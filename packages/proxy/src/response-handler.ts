@@ -9,7 +9,10 @@ import type { ProxyContext } from "./handlers";
 import { applyRateLimitCooldown } from "./handlers/rate-limit-cooldown";
 import { createSseRateLimitSniffer } from "./handlers/sse-rate-limit-sniffer";
 import { combineChunks, teeStream } from "./stream-tee";
-import { getUsageCollector } from "./usage-collector";
+import {
+	getUsageCollector,
+	isRequestResponseJsonlLoggingEnabled,
+} from "./usage-collector";
 import type { EndMessage, StartMessage } from "./worker-messages";
 
 const log = new Logger("ResponseHandler");
@@ -113,6 +116,8 @@ export async function forwardToClient(
 
 	const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
 	const shouldStorePayloads = ctx.config.getStorePayloads?.() ?? true;
+	const jsonlLoggingEnabled = isRequestResponseJsonlLoggingEnabled();
+	const shouldCaptureRequestPayload = shouldStorePayloads || jsonlLoggingEnabled;
 
 	// Filter out:
 	//   - count_tokens requests on OpenAI-compatible providers (existing
@@ -141,7 +146,7 @@ export async function forwardToClient(
 			timestamp,
 			requestHeaders: requestHeadersObj,
 			requestBody:
-				shouldStorePayloads && requestBody
+				shouldCaptureRequestPayload && requestBody
 					? Buffer.from(
 							new Uint8Array(requestBody).subarray(
 								0,
