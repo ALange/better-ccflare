@@ -62,12 +62,12 @@ function shouldLogRequest(path: string, status: number): boolean {
 	return true;
 }
 
-function getRequestResponseJsonlPath(): string | null {
+export function getRequestResponseJsonlPath(): string | null {
 	const path = process.env[REQUEST_RESPONSE_JSONL_PATH_ENV]?.trim();
-	return path ? path : null;
+	return path || null;
 }
 
-function isJsonlLoggingEnabled(): boolean {
+export function isRequestResponseJsonlLoggingEnabled(): boolean {
 	return getRequestResponseJsonlPath() !== null;
 }
 
@@ -414,6 +414,9 @@ export class UsageCollector {
 
 	private readonly maxBufferSize: number;
 	private readonly timeoutMs: number;
+	private readonly jsonlPath: string | null;
+	private readonly captureChunksForJsonl: boolean;
+	private jsonlDirReady = false;
 
 	constructor(
 		private readonly dbOps: DatabaseOperations,
@@ -429,6 +432,8 @@ export class UsageCollector {
 		this.timeoutMs = Number(
 			process.env.CF_STREAM_TIMEOUT_MS || TIME_CONSTANTS.STREAM_TIMEOUT_DEFAULT,
 		);
+		this.jsonlPath = getRequestResponseJsonlPath();
+		this.captureChunksForJsonl = this.jsonlPath !== null;
 
 		this.startCleanupInterval();
 	}
@@ -559,7 +564,7 @@ export class UsageCollector {
 
 		const storePayloads = this.getStorePayloads();
 		const shouldCaptureForPayloadOrJsonl =
-			storePayloads || isJsonlLoggingEnabled();
+			storePayloads || this.captureChunksForJsonl;
 
 		// Store chunk for later payload saving (capped at MAX_RESPONSE_BODY_BYTES)
 		if (shouldCaptureForPayloadOrJsonl && !state.chunksTruncated) {
@@ -965,11 +970,14 @@ export class UsageCollector {
 		requestBodyBase64: string | null;
 		responseBodyBase64: string | null;
 	}): Promise<void> {
-		const jsonlPath = getRequestResponseJsonlPath();
+		const jsonlPath = this.jsonlPath;
 		if (!jsonlPath) return;
 
 		try {
-			await mkdir(dirname(jsonlPath), { recursive: true });
+			if (!this.jsonlDirReady) {
+				await mkdir(dirname(jsonlPath), { recursive: true });
+				this.jsonlDirReady = true;
+			}
 			const line = JSON.stringify({
 				request: {
 					headers: input.startMessage.requestHeaders,
