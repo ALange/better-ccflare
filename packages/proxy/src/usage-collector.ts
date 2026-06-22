@@ -3,6 +3,8 @@ import {
 	estimateCostUSD,
 	TIME_CONSTANTS,
 } from "@better-ccflare/core";
+import { appendFile, mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import { AsyncDbWriter, DatabaseOperations } from "@better-ccflare/database";
 import { Logger } from "@better-ccflare/logger";
 import { NO_ACCOUNT_ID, type RequestResponse } from "@better-ccflare/types";
@@ -48,6 +50,8 @@ const MAX_REQUESTS_MAP_SIZE = 10000;
 const REQUEST_TTL_MS = 2 * 60 * 1000; // 2 minutes - hard limit for request lifecycle
 const MAX_RESPONSE_BODY_BYTES = 256 * 1024; // 256KB - cap stored response body
 const MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024; // 4MB - afterburn needs full conversation history
+const REQUEST_RESPONSE_JSONL_PATH_ENV =
+	"BETTER_CCFLARE_REQUEST_RESPONSE_JSONL_PATH";
 
 // Check if a request should be logged
 function shouldLogRequest(path: string, status: number): boolean {
@@ -56,6 +60,24 @@ function shouldLogRequest(path: string, status: number): boolean {
 		return false;
 	}
 	return true;
+}
+
+function getRequestResponseJsonlPath(): string | null {
+	const path = process.env[REQUEST_RESPONSE_JSONL_PATH_ENV]?.trim();
+	return path ? path : null;
+}
+
+function isJsonlLoggingEnabled(): boolean {
+	return getRequestResponseJsonlPath() !== null;
+}
+
+function decodeBase64Payload(payload: string | null | undefined): string | null {
+	if (!payload) return null;
+	try {
+		return Buffer.from(payload, "base64").toString("utf-8");
+	} catch {
+		return null;
+	}
 }
 
 // Project names are persisted to a single TEXT column and surfaced in the UI.
@@ -536,9 +558,11 @@ export class UsageCollector {
 		}
 
 		const storePayloads = this.getStorePayloads();
+		const shouldCaptureForPayloadOrJsonl =
+			storePayloads || isJsonlLoggingEnabled();
 
 		// Store chunk for later payload saving (capped at MAX_RESPONSE_BODY_BYTES)
-		if (storePayloads && !state.chunksTruncated) {
+		if (shouldCaptureForPayloadOrJsonl && !state.chunksTruncated) {
 			if (state.chunksBytes + data.byteLength <= MAX_RESPONSE_BODY_BYTES) {
 				state.chunks.push(data);
 				state.chunksBytes += data.byteLength;
@@ -791,6 +815,35 @@ export class UsageCollector {
 
 		const requestId = startMessage.requestId;
 		const storePayloads = this.getStorePayloads();
+		let responseBodyBase64: string | null = null;
+		if (msg.responseBody) {
+			responseBodyBase64 = msg.responseBody;
+		} else if (state.chunks.length > 0) {
+			const combined = combineChunks(state.chunks);
+			if (combined.length > 0) {
+				responseBodyBase64 = combined.toString("base64");
+			}
+		}
+
+		let requestBodyBase64 = startMessage.requestBody;
+		if (requestBodyBase64) {
+			const rawBytes = Buffer.byteLength(requestBodyBase64, "base64");
+			if (rawBytes > MAX_REQUEST_BODY_BYTES) {
+				requestBodyBase64 = Buffer.from(requestBodyBase64, "base64")
+					.subarray(0, MAX_REQUEST_BODY_BYTES)
+					.toString("base64");
+			}
+		}
+
+		await this.writeRequestResponseJsonlRecord({
+			startMessage,
+			endMessage: msg,
+			responseTime,
+			project: state.project ?? null,
+			requestBodyBase64,
+			responseBodyBase64,
+		});
+
 		if (storePayloads) {
 			// Preflight backpressure check — skip serialization entirely if the
 			// writer is already overloaded. The metadata write above already
@@ -808,39 +861,15 @@ export class UsageCollector {
 				);
 			} else {
 				// Save payload - eagerly serialize to break closure references
-				let responseBody: string | null = null;
-
-				if (msg.responseBody) {
-					// Non-streaming response
-					responseBody = msg.responseBody;
-				} else if (state.chunks.length > 0) {
-					// Streaming response - combine chunks
-					const combined = combineChunks(state.chunks);
-					if (combined.length > 0) {
-						responseBody = combined.toString("base64");
-					}
-				}
-
-				// Cap request body to prevent unbounded payload storage
-				let requestBody = startMessage.requestBody;
-				if (requestBody) {
-					const rawBytes = Buffer.byteLength(requestBody, "base64");
-					if (rawBytes > MAX_REQUEST_BODY_BYTES) {
-						requestBody = Buffer.from(requestBody, "base64")
-							.subarray(0, MAX_REQUEST_BODY_BYTES)
-							.toString("base64");
-					}
-				}
-
 				const payloadJson = JSON.stringify({
 					request: {
 						headers: startMessage.requestHeaders,
-						body: requestBody,
+						body: requestBodyBase64,
 					},
 					response: {
 						status: startMessage.responseStatus,
 						headers: startMessage.responseHeaders,
-						body: responseBody,
+						body: responseBodyBase64,
 					},
 					meta: {
 						accountId: startMessage.accountId || NO_ACCOUNT_ID,
@@ -851,9 +880,6 @@ export class UsageCollector {
 						project: state.project ?? undefined,
 					},
 				});
-
-				// Null out large references now that we have the serialized JSON
-				responseBody = null;
 
 				const payloadBytes = Buffer.byteLength(payloadJson);
 				const accepted = this.asyncWriter.enqueuePayload(
@@ -929,6 +955,54 @@ export class UsageCollector {
 
 		// Clean up
 		this.requests.delete(msg.requestId);
+	}
+
+	private async writeRequestResponseJsonlRecord(input: {
+		startMessage: StartMessage;
+		endMessage: EndMessage;
+		responseTime: number;
+		project: string | null;
+		requestBodyBase64: string | null;
+		responseBodyBase64: string | null;
+	}): Promise<void> {
+		const jsonlPath = getRequestResponseJsonlPath();
+		if (!jsonlPath) return;
+
+		try {
+			await mkdir(dirname(jsonlPath), { recursive: true });
+			const line = JSON.stringify({
+				request: {
+					headers: input.startMessage.requestHeaders,
+					body: decodeBase64Payload(input.requestBodyBase64),
+					bodyBase64: input.requestBodyBase64,
+				},
+				response: {
+					status: input.startMessage.responseStatus,
+					headers: input.startMessage.responseHeaders,
+					body: decodeBase64Payload(input.responseBodyBase64),
+					bodyBase64: input.responseBodyBase64,
+				},
+				meta: {
+					requestId: input.startMessage.requestId,
+					timestamp: new Date(input.startMessage.timestamp).toISOString(),
+					method: input.startMessage.method,
+					path: input.startMessage.path,
+					responseTimeMs: input.responseTime,
+					success: input.endMessage.success,
+					error: input.endMessage.error || null,
+					isStream: input.startMessage.isStream,
+					provider: input.startMessage.providerName,
+					accountId: input.startMessage.accountId,
+					agentUsed: input.startMessage.agentUsed,
+					project: input.project,
+					retryAttempt: input.startMessage.retryAttempt,
+					failoverAttempts: input.startMessage.failoverAttempts,
+				},
+			});
+			await appendFile(jsonlPath, `${line}\n`, "utf8");
+		} catch (error) {
+			log.warn(`Failed to append request/response JSONL record: ${error}`);
+		}
 	}
 
 	private cleanupStaleRequests(): void {

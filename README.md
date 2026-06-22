@@ -196,6 +196,8 @@ BETTER_CCFLARE_DISCOVER_PLUGIN_AGENTS=false  # Set to true to discover agents di
 # Storage
 STORE_PAYLOADS=false                   # Disable storing request/response bodies (reduces DB size and memory usage)
                                        # Token counts, costs, model, status and timing are still recorded
+BETTER_CCFLARE_REQUEST_RESPONSE_JSONL_PATH=/path/to/requests.jsonl
+                                       # Optional: append one JSONL record per proxied request/response for fine-tuning datasets
 
 # Payload encryption at rest (optional)
 # When set, request/response payloads are encrypted with AES-256-GCM before
@@ -252,6 +254,7 @@ REQUEST_RETENTION_DAYS=90
 
 # Storage (set to false to skip storing request/response bodies, reducing DB size and memory pressure)
 STORE_PAYLOADS=true
+BETTER_CCFLARE_REQUEST_RESPONSE_JSONL_PATH=/tmp/better-ccflare-requests.jsonl
 ```
 
 **Usage with different deployment methods**:

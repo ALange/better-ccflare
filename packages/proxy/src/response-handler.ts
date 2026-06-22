@@ -113,6 +113,10 @@ export async function forwardToClient(
 
 	const isStream = ctx.provider.isStreamingResponse?.(response) ?? false;
 	const shouldStorePayloads = ctx.config.getStorePayloads?.() ?? true;
+	const jsonlLoggingEnabled = Boolean(
+		process.env.BETTER_CCFLARE_REQUEST_RESPONSE_JSONL_PATH?.trim(),
+	);
+	const shouldCaptureRequestPayload = shouldStorePayloads || jsonlLoggingEnabled;
 
 	// Filter out:
 	//   - count_tokens requests on OpenAI-compatible providers (existing
@@ -141,7 +145,7 @@ export async function forwardToClient(
 			timestamp,
 			requestHeaders: requestHeadersObj,
 			requestBody:
-				shouldStorePayloads && requestBody
+				shouldCaptureRequestPayload && requestBody
 					? Buffer.from(
 							new Uint8Array(requestBody).subarray(
 								0,
