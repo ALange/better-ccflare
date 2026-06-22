@@ -9,6 +9,36 @@ import type { StartMessage } from "../worker-messages";
 const JSONL_ENV_KEY = "BETTER_CCFLARE_REQUEST_RESPONSE_JSONL_PATH";
 const ORIGINAL_JSONL_PATH = process.env[JSONL_ENV_KEY];
 
+interface JsonlRecord {
+	request: {
+		headers: Record<string, string>;
+		body: string | null;
+		bodyBase64: string | null;
+	};
+	response: {
+		status: number;
+		headers: Record<string, string>;
+		body: string | null;
+		bodyBase64: string | null;
+	};
+	meta: {
+		requestId: string;
+		timestamp: string;
+		method: string;
+		path: string;
+		responseTimeMs: number;
+		success: boolean;
+		error: string | null;
+		isStream: boolean;
+		provider: string;
+		accountId: string | null;
+		agentUsed: string | null;
+		project: string | null;
+		retryAttempt: number;
+		failoverAttempts: number;
+	};
+}
+
 function makeCollector(getStorePayloads: () => boolean): UsageCollector {
 	const dbOps = {
 		saveRequest: async () => {},
@@ -99,16 +129,16 @@ describe("UsageCollector JSONL logging", () => {
 			});
 
 			const lines = readFileSync(jsonlPath, "utf8").trim().split("\n");
-			const entry = JSON.parse(lines[0]) as {
-				request: { body: string | null };
-				response: { body: string | null };
-				meta: { requestId: string };
-			};
+			const entry = JSON.parse(lines[0]) as JsonlRecord;
 
 			expect(lines.length).toBe(1);
 			expect(entry.meta.requestId).toBe("req-jsonl");
+			expect(entry.request.headers["content-type"]).toBe("application/json");
+			expect(entry.response.status).toBe(200);
 			expect(entry.request.body).toContain('"content":"hello"');
 			expect(entry.response.body).toContain('"text":"world"');
+			expect(entry.request.bodyBase64).not.toBeNull();
+			expect(entry.response.bodyBase64).not.toBeNull();
 		} finally {
 			collector.dispose();
 		}
@@ -137,11 +167,9 @@ describe("UsageCollector JSONL logging", () => {
 			});
 
 			const lines = readFileSync(jsonlPath, "utf8").trim().split("\n");
-			const entry = JSON.parse(lines[0]) as {
-				response: { body: string | null };
-				meta: { isStream: boolean };
-			};
+			const entry = JSON.parse(lines[0]) as JsonlRecord;
 
+			expect(entry.meta.requestId).toBe("req-stream");
 			expect(entry.meta.isStream).toBe(true);
 			expect(entry.response.body).toContain("data: one");
 			expect(entry.response.body).toContain("data: two");

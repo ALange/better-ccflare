@@ -78,6 +78,27 @@ function decodeBase64Payload(payload: string | null | undefined): string | null 
 	} catch {
 		return null;
 	}
+
+	function capRequestBodyBase64(requestBodyBase64: string | null): string | null {
+		if (!requestBodyBase64) return null;
+		const rawBytes = Buffer.byteLength(requestBodyBase64, "base64");
+		if (rawBytes <= MAX_REQUEST_BODY_BYTES) {
+			return requestBodyBase64;
+		}
+		return Buffer.from(requestBodyBase64, "base64")
+			.subarray(0, MAX_REQUEST_BODY_BYTES)
+			.toString("base64");
+	}
+
+	function getResponseBodyBase64(
+		msg: EndMessage,
+		chunks: Uint8Array[],
+	): string | null {
+		if (msg.responseBody) return msg.responseBody;
+		if (chunks.length === 0) return null;
+		const combined = combineChunks(chunks);
+		return combined.length > 0 ? combined.toString("base64") : null;
+	}
 }
 
 // Project names are persisted to a single TEXT column and surfaced in the UI.
@@ -416,7 +437,7 @@ export class UsageCollector {
 	private readonly timeoutMs: number;
 	private readonly jsonlPath: string | null;
 	private readonly captureChunksForJsonl: boolean;
-	private jsonlDirReady = false;
+	private jsonlDirReadyPromise: Promise<void> | null = null;
 
 	constructor(
 		private readonly dbOps: DatabaseOperations,
@@ -820,25 +841,8 @@ export class UsageCollector {
 
 		const requestId = startMessage.requestId;
 		const storePayloads = this.getStorePayloads();
-		let responseBodyBase64: string | null = null;
-		if (msg.responseBody) {
-			responseBodyBase64 = msg.responseBody;
-		} else if (state.chunks.length > 0) {
-			const combined = combineChunks(state.chunks);
-			if (combined.length > 0) {
-				responseBodyBase64 = combined.toString("base64");
-			}
-		}
-
-		let requestBodyBase64 = startMessage.requestBody;
-		if (requestBodyBase64) {
-			const rawBytes = Buffer.byteLength(requestBodyBase64, "base64");
-			if (rawBytes > MAX_REQUEST_BODY_BYTES) {
-				requestBodyBase64 = Buffer.from(requestBodyBase64, "base64")
-					.subarray(0, MAX_REQUEST_BODY_BYTES)
-					.toString("base64");
-			}
-		}
+		const responseBodyBase64 = getResponseBodyBase64(msg, state.chunks);
+		const requestBodyBase64 = capRequestBodyBase64(startMessage.requestBody);
 
 		await this.writeRequestResponseJsonlRecord({
 			startMessage,
@@ -974,10 +978,12 @@ export class UsageCollector {
 		if (!jsonlPath) return;
 
 		try {
-			if (!this.jsonlDirReady) {
-				await mkdir(dirname(jsonlPath), { recursive: true });
-				this.jsonlDirReady = true;
+			if (!this.jsonlDirReadyPromise) {
+				this.jsonlDirReadyPromise = mkdir(dirname(jsonlPath), {
+					recursive: true,
+				}).then(() => {});
 			}
+			await this.jsonlDirReadyPromise;
 			const line = JSON.stringify({
 				request: {
 					headers: input.startMessage.requestHeaders,
